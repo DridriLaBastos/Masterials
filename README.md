@@ -1,1 +1,2 @@
 # Masterials
+Objectif: Prédire à chaque visite le traitement et la date de la prochaine visite en utilisant les données de l'article `DeepEHR_2018.pdf` présent dans l'archive `Articles.tar.gz`. Les données a utiliser sont compressées dans l'archive `PatientsHTA.tar.gz`
