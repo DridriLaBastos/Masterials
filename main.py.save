@@ -1,0 +1,68 @@
+# To add a new cell, type '# %%'
+# To add a new markdown cell, type '# %% [markdown]'
+# %%
+from numpy.lib.function_base import copy
+import pandas as pd
+from pandas._libs.tslibs import Timestamp
+from pandas.io.formats.format import Datetime64Formatter
+import tensorflow as tf
+import keras
+from matplotlib import pyplot as plt
+from tensorflow.keras import datasets, layers, models
+from sklearn.preprocessing import LabelEncoder
+
+# %%
+#Getting data and parsing the dates
+df = pd.read_csv('PatientsHTA.zip',engine='c',nrows=1000,skipinitialspace=True,parse_dates=['contact_date','Glycemie_der_date','HbA1c_der_date','der_date_poids','der_date_taille','first_contact_date'])
+df.drop_duplicates(inplace=True)
+
+#Enlever les 12 lignes de frequency sui ne sont pas les memes puis supprimer cette colonne
+df = df.drop('person_id','cip','long_name','product_atc')
+
+#columns = df.loc[:,df.dtypes == object].columns
+#df[columns] = df[columns].convert_dtypes(str)
+#
+##removing trailing spaces
+#for cName in columns:
+#    df[cName] = df[cName].str.rstrip()
+
+# %%
+#Tentative d'un affichage
+dfMedecinSpecialityCount = df.groupby(df.specialty_label)[['person_id']].count()
+dfMedecinSpecialityCount.reset_index(inplace=True)
+
+plt.bar(dfMedecinSpecialityCount['specialty_label'],dfMedecinSpecialityCount['person_id'])
+plt.xlabel('specialty label')
+plt.ylabel('count')
+plt.show()
+# %%
+#Tentative d'un affichage
+dfShortName = df.groupby(df.short_name)[['person_id']].count()
+dfShortName.reset_index(inplace=True)
+
+plt.bar(dfShortName['short_name'],dfShortName['person_id'])
+plt.xlabel('short_name')
+plt.ylabel('count')
+plt.xticks(rotation=90)
+plt.show()
+# %%
+dataDf = df[['first_contact_date','product_atc_code','contact_date']]
+#%%
+dataDf.first_contact_date = dataDf.first_contact_date.astype(int)
+dataDf.contact_date = dataDf.contact_date.astype(int)
+labelEncoder = LabelEncoder()
+dataDf.product_atc_code = labelEncoder.fit_transform(dataDf.product_atc_code)
+
+dataDf['visit_interval'] = dataDf.contact_date - dataDf.first_contact_date
+#%%
+dataX = dataDf.first_contact_date
+dataY = dataDf[['product_atc_code','visit_interval']]
+
+trainData = dataX[:800]
+trainLabel = dataY[:800]
+
+testData = dataX[800:]
+testLabel = dataY[800:]
+# %%
+model = models.Sequential()
+
