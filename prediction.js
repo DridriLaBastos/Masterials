@@ -2,19 +2,49 @@
 
 const file_path = './PatientsHTA.csv';
 
+const env = ( typeof Deno !== 'undefined' ? 'deno' : typeof module !== 'undefined' && module.exports ? 'node' : 'browser' );
+
+const values = object => {
+    const array = [];
+    for ( const prop in object ) {
+        if ( Object.prototype.hasOwnProperty.call( object, prop ) ) {
+            array.push( object[prop] );
+        }
+    }
+    return array;
+};
+
+console.log( 'Environment ::', env );
+
 class Dataset {
 
     constructor ( file_path, options ) {
-        const { excludedParameters, encoders, types } = options || {};
-        const fs = require( 'fs' );
-        const file_content = fs.readFileSync( file_path, { encoding: 'utf8', flag: 'r' } );
+        const { excluded, encoders, types } = ( options || {} );
+        let file_content;
+        switch ( env ) {
+            case 'deno': {
+                const decoder = new TextDecoder( 'utf-8' );
+                const fileBuffer = Deno.readFileSync( file_path, { encoding: 'utf-8', flag: 'r' } );
+                file_content = decoder.decode( fileBuffer );
+                break;
+            }
+            case 'node': {
+                const fs = require( 'fs' );
+                file_content = fs.readFileSync( file_path, { encoding: 'utf8', flag: 'r' } );
+                break;
+            }
+            default: {
+                break;
+            }
+        }
         const [header, ...rows] = file_content
             .split( /\n/g )
-            .map( row => row.replace( '\r', '' ).split( /\,/g ).map( cell => cell.trim() ) )
+            .map( row => row.replace( /\r/g, '' ).split( /\,/g ).map( cell => cell.trim() ) )
             .filter( row => row.length > 0 && row.some( item => !!item === true ) );
 
         this.header = Dataset.parseHeader( header, { types } );
-        this.rows = Dataset.parseRows( this.header, rows, { excludedParameters } );
+
+        this.rows = Dataset.parseRows( this.header, rows, { excluded } );
         this.encoders = new Map();
         if ( encoders ) {
             this.encode( ...( typeof encoders === 'string' ? [encoders] : encoders ) );
@@ -27,52 +57,202 @@ class Dataset {
     }
 
     static parseType( types, prop ) {
-        const classic = value => value === '' ? undefined : value;
+        const to_same = function to_same( value ) { return value === '' ? undefined : value; };
+
         if ( !types ) {
-            return classic;
+            return to_same;
         }
         if ( typeof types[prop] === 'function' ) {
-            return value => types[prop]( value );
+            return function to_custom( value ) { return types[prop]( value ); };
         }
         else {
             switch ( types[prop] ) {
                 case 'number': {
-                    return value => Number( value );
+                    return function to_number( value ) {
+                        const new_value = to_same( value );
+                        return new_value === undefined ? undefined : isNaN( +new_value ) ? undefined : +new_value;
+                    };
                 }
                 case 'bigint': {
-                    return value => BigInt( value );
+                    return function to_bigint( value ) {
+                        return BigInt( to_same( value ) );
+                    };
                 }
                 case 'boolean': {
-                    return value => isNaN( +value ) ? Boolean( value ) : !!( +value );
+                    return function to_boolean( value ) {
+                        const new_value = to_same( value );
+                        return isNaN( +new_value ) ? Boolean( new_value ) : !!( +new_value );
+                    };
                 }
                 case 'object': {
-                    return value => JSON.parse( value );
+                    return function to_object( value ) {
+                        return JSON.parse( to_same( value ) );
+                    };
+                }
+                case 'string': {
+                    return function to_string( value ) {
+                        return String( to_same( value ) );
+                    };
                 }
                 default: {
-                    return classic;
+                    return to_same;
                 }
             }
         }
-
     }
 
     static parseRows( header, rows, options ) {
-        const { excludedParameters } = options || {};
-        const ex_params = excludedParameters ? typeof excludedParameters === 'string' ? [excludedParameters] : excludedParameters : undefined;
-        if ( ex_params ) {
-            for ( const ex_param of ex_params ) {
-                header.delete( ex_param );
+        const { excluded } = options || {};
+        const to_exclude = excluded ? typeof excluded === 'string' ? [excluded] : excluded : undefined;
+        if ( to_exclude ) {
+            for ( const item of to_exclude ) {
+                header.delete( item );
             }
         }
         return rows.map( row => {
             const curr = Object.create( null );
             for ( const [column, { index, type }] of header.entries() ) {
-                if ( !( ex_params && ex_params.includes( column ) ) ) {
+                if ( !( to_exclude && to_exclude.includes( column ) ) ) {
                     curr[column] = type( row[index] );
                 }
             }
             return curr;
         } );
+    }
+
+    sort( columns, options ) {
+        const sort_func = ( type ) => {
+            if ( typeof type === 'function' ) {
+                return type;
+            }
+            else {
+                const to_lower = type.toLowerCase();
+                switch ( to_lower ) {
+                    case 'd':
+                    case 'desc':
+                    case 'descending': {
+                        return ( a, b ) => b - a;
+                    }
+                    default: {
+                        return ( a, b ) => a - b;
+                    }
+                }
+            }
+        };
+
+        const { groupBy } = options || {};
+
+        if ( groupBy ) {
+            const groupBy_func = ( map, target, [prop, ...subProps] = [] ) => {
+                if ( !( this.header.has( prop ) ) ) {
+                    throw new Error( `Parameter ${prop} does not exist.` );
+                }
+                let items;
+                if ( map.has( target[prop] ) ) {
+                    items = map.get( target[prop] );
+                }
+                else {
+                    if ( subProps.length > 0 ) {
+                        items = new Map();
+                    }
+                    else {
+                        items = [];
+                    }
+                }
+                if ( prop in target ) {
+                    if ( subProps.length > 0 ) {
+                        groupBy_func( items, target, subProps );
+                    }
+                    else {
+                        items.push( target );
+                    }
+                    map.set( target[prop], items );
+                }
+                else {
+                    throw new Error( `Target property ${prop} does not exist.` );
+                }
+            };
+            const flat_map_func = ( map, sort_map, [prop, ...subProps] = [] ) => {
+                if ( map instanceof Map ) {
+                    const to_array = [...map.values()]
+                        .map( item => flat_map_func( item, sort_map, subProps ) )
+                        .flat( Infinity );
+                    return sort_map.has( prop )
+                        ? to_array.sort( ( { [prop]: a }, { [prop]: b } ) => sort_func( sort_map.get( prop ) )( a, b ) )
+                        : to_array;
+                }
+                else {
+                    return prop
+                        ? map.sort( ( { [prop]: a }, { [prop]: b } ) => sort_func( sort_map.get( prop ) )( a, b ) )
+                        : map;
+                }
+            };
+
+            const filtered_map = new Map();
+
+            for ( const row of this.rows ) {
+                groupBy_func( filtered_map, row, typeof groupBy === 'string' ? [groupBy] : groupBy );
+            }
+            const sort_map = new Map( columns );
+            this.rows = flat_map_func( filtered_map, sort_map, groupBy );
+        }
+        else {
+            for ( const [column, type] of columns ) {
+                this.rows = this.rows.sort( ( { [column]: a }, { [column]: b } ) => sort_func( type )( a, b ) );
+            }
+        }
+    }
+
+    filter( func, options ) {
+        const { groupBy, groupFilter } = ( options || {} );
+
+        const filter_func = filter => typeof filter === 'function'
+            ? filter
+            : value => value;
+
+        if ( groupBy ) {
+            const groupBy_array = typeof groupBy === 'string' ? [groupBy] : groupBy;
+            const groupBy_func = ( map, target, [prop, ...subProps] ) => {
+                if ( !( this.header.has( prop ) ) ) {
+                    throw new Error( `Parameter ${prop} does not exist.` );
+                }
+
+                const items = map.has( target[prop] )
+                    ? map.get( target[prop] )
+                    : subProps.length > 0 ? new Map() : [];
+
+                if ( prop in target ) {
+                    if ( subProps.length > 0 ) {
+                        groupBy_func( items, target, subProps );
+                    }
+                    else {
+                        items.push( target );
+                    }
+                    map.set( target[prop], items );
+                }
+                else {
+                    throw new Error( `Target property ${prop} does not exist.` );
+                }
+            };
+
+            const flat_map_func = ( map, [prop, ...props], filters ) => map instanceof Map
+                ? [...( map.values() )]
+                    .map( item => flat_map_func( item, props, filters ) )
+                    .filter( filter_func( filters[prop] ) )
+                    .flat( Infinity )
+                : map;
+
+            const filtered_map = new Map();
+
+            for ( const row of this.rows ) {
+                groupBy_func( filtered_map, row, groupBy_array );
+            }
+
+            this.rows = flat_map_func( filtered_map, groupBy_array, groupFilter );
+        }
+        if ( func ) {
+            this.rows = this.rows.filter( filter_func( func ) );
+        }
     }
 
     encode( ...columns ) {
@@ -126,7 +306,7 @@ class Dataset {
         }
     }
 
-    throughRows( options ) {
+    through_rows( options ) {
         const filterBy_func = ( prop, prop_value, target ) => {
             if ( !( this.header.has( prop ) ) ) {
                 throw new Error( `Parameter ${prop} does not exist.` );
@@ -138,8 +318,7 @@ class Dataset {
                 return prop in target && target[prop] === prop_value;
             }
         };
-        const groupBy_func = ( map, target, ...props ) => {
-            const [prop, ...subProps] = props;
+        const groupBy_func = ( map, target, ...[prop, ...props] ) => {
             if ( !( this.header.has( prop ) ) ) {
                 throw new Error( `Parameter ${prop} does not exist.` );
             }
@@ -148,93 +327,118 @@ class Dataset {
                 items = map.get( target[prop] );
             }
             else {
-                if ( subProps.length > 0 ) {
+                if ( props.length > 0 ) {
                     items = new Map();
                 }
                 else {
                     items = [];
                 }
             }
+            let index = [];
             if ( prop in target ) {
-                if ( subProps.length > 0 ) {
-                    groupBy_func( items, target, ...subProps );
+                if ( props.length > 0 ) {
+                    index.push( ...groupBy_func( items, target, ...props ) );
                 }
                 else {
                     items.push( target );
                 }
                 map.set( target[prop], items );
+                index.push( map.size - 1 );
             }
             else {
                 throw new Error( `Target property ${prop} does not exist.` );
             }
+            return index;
         };
+        const deep_map_get = ( map, row, prop, ...props ) => {
+            const values = [];
+            if ( map instanceof Map ) {
+                if ( props.length > 0 ) {
+                    values.push( ...deep_map_get( map.get( row[prop] ), row, props ), map );
+                }
+                else {
+                    values.push( map );
+                }
+            }
+            return values.flat( Infinity );
+        };
+
         if ( options ) {
-            const { filterBy, groupBy } = options;
+            const { filterBy, groupBy, ignore } = options;
+            const groupByArray = typeof groupBy === 'string' ? [groupBy] : groupBy;
             const index_lookup = [];
+            const deep_index_lookup = [];
             const filtered_rows = [];
             const filtered_map = new Map();
-            for ( let index = 0, length = this.rows.length; index < length; index++ ) {
+            let index = 0;
+            for ( const row of this.rows ) {
                 if ( filterBy ) {
-                    if ( filterBy.every( ( [prop, value] ) => filterBy_func( prop, value, this.rows[index] ) ) ) {
+                    if ( filterBy.every( ( [prop, value] ) => filterBy_func( prop, value, row ) ) ) {
                         if ( groupBy ) {
-                            groupBy_func( filtered_map, this.rows[index], ...( typeof groupBy === 'string' ? [groupBy] : groupBy ) );
+                            deep_index_lookup.push( ...groupBy_func( filtered_map, row, ...groupByArray ) );
                             index_lookup.push( index );
                         }
                         else {
                             index_lookup.push( index );
-                            filtered_rows.push( this.rows[index] );
+                            filtered_rows.push( row );
                         }
                     }
                 }
                 else if ( groupBy ) {
-                    groupBy_func( filtered_map, this.rows[index], ...( typeof groupBy === 'string' ? [groupBy] : groupBy ) );
+                    deep_index_lookup.push( [...groupBy_func( filtered_map, row, ...groupByArray ), index] );
+                    index_lookup.push( index );
                 }
+                index++;
             }
             if ( groupBy ) {
-                const entries = [...( filtered_map.entries() )];
-                let index = -1;
-                const limit = entries.length;
+                let index = 0;
+                const _this = this;
+                const limit = deep_index_lookup.length;
                 return ( {
-                    [Symbol.iterator]: () => {
-                        return ( {
-                            next: () => {
-                                return ++index < limit ? { value: entries[index], done: false } : { done: true };
-                            }
-                        } );
-                    }
+                    [Symbol.iterator]: () => ( {
+                        next: () => ( {
+                            value: index < limit ? Object.assign( Object.create( null ), {
+                                row: _this.rows[index_lookup[index]],
+                                ...( ignore && ignore.includes( 'groups' ) ? {} : {
+                                    groups: deep_map_get( filtered_map, _this.rows[index_lookup[index]], ...groupByArray )
+                                } ),
+                                ...( ignore && ignore.includes( 'indices' ) ? {} : { indices: deep_index_lookup[index] } )
+                            } ) : undefined, done: !( index++ < limit )
+                        } )
+                    } )
                 } );
             }
             else if ( filterBy ) {
-                let index = -1;
+                let index = 0;
+                const _this = this;
                 const limit = filtered_rows.length;
                 return ( {
-                    [Symbol.iterator]: () => {
-                        return ( {
-                            next: () => {
-                                return ++index < limit ? { value: [filtered_rows[index], [index, index_lookup[index]], [filtered_rows, this.rows]], done: false } : { done: true };
-                            }
-                        } );
-                    }
+                    [Symbol.iterator]: () => ( {
+                        next: () => ( {
+                            value: index < limit ? Object.assign( Object.create( null ), {
+                                row: _this.rows[index_lookup[index]],
+                                index: index_lookup[index],
+                                filtered_rows: filtered_rows,
+                                filtered_index: index,
+                            } ) : undefined, done: !( index++ < limit )
+                        } )
+                    } )
+                } );
+            }
+            else {
+                let index = 0;
+                const limit = this.rows.length;
+                return ( {
+                    [Symbol.iterator]: () => ( {
+                        next: () => ( { value: index < limit ? [this.rows[index], index, this.rows] : undefined, done: !( index++ < limit ) } )
+                    } )
                 } );
             }
         }
-        else {
-            let index = -1;
-            const limit = this.rows.length;
-            return ( {
-                [Symbol.iterator]: () => {
-                    return ( {
-                        next: () => {
-                            return ++index < limit ? { value: [this.rows[index], index, this.rows], done: false } : { done: true };
-                        }
-                    } );
-                }
-            } );
-        }
     }
 
-    setTypes( types ) {
-        const typeToApply = [];
+    add_types( types ) {
+        const to_apply = [];
         for ( let prop in types ) {
             if ( types.hasOwnProperty( prop ) ) {
                 if ( !( this.header.has( prop ) ) ) {
@@ -244,13 +448,13 @@ class Dataset {
                     const item = this.header.get( prop );
                     item.type = Dataset.parseType( types, prop );
                     this.header.set( prop, item );
-                    typeToApply.push( { prop, func: item.type } );
+                    to_apply.push( { prop, func: item.type } );
 
                 }
             }
         }
         for ( const row of this.rows ) {
-            for ( const { prop, func } of typeToApply ) {
+            for ( const { prop, func } of to_apply ) {
                 if ( prop in row ) {
                     row[prop] = func( row[prop] );
                 }
@@ -258,7 +462,7 @@ class Dataset {
         }
     }
 
-    removeParameters( ...parameters ) {
+    drop_column( ...parameters ) {
         for ( const row of this.rows ) {
             for ( const parameter of parameters ) {
                 if ( parameter in row ) {
@@ -272,13 +476,17 @@ class Dataset {
     }
 }
 
-const toDate = date => {
+const to_date = date => {
     const [day, month, year] = date.split( /\//g );
     return new Date( year, month - 1, day );
 };
 
+const traitement_to_bool = traitement => traitement === 'OUI' ? 0b1 : 0b0;
+
+console.time( 'Dataset processing :' );
+
 const data = new Dataset( file_path, {
-    excludedParameters: [
+    excluded: [
         'Glycemie_der_date',
         'HbA1c_der_date',
         'der_date_poids',
@@ -295,7 +503,8 @@ const data = new Dataset( file_path, {
         'long_name',
         'Classe',
         'product_atc',
-        'contact_id'
+        'contact_id',
+        'first_contact_date'
     ],
     types: {
         'quantity': 'number',
@@ -307,26 +516,54 @@ const data = new Dataset( file_path, {
         'person_id': 'number',
         'Age_presc': 'number',
         'year_of_birth': 'number',
+        'Glycemie_prescription': 'number',
+        'Glycemie_der_mesure': 'number',
+        'HbA1c_prescription': 'number',
+        'HbA1c_der_mesure': 'number',
         'Tension Diastolique': 'number',
         'Tension Systolique': 'number',
-        'contact_date': toDate,
-        'first_contact_date': toDate
+        'contact_date': to_date,
+        'Traitement_Autres_A10_dep_201701': traitement_to_bool,
+        'Traitement_Insulines_dep_201701': traitement_to_bool
     },
     encoders: [
         'gender_code',
         'frequency_label',
         'product_atc_code',
         'specialty_label',
+        
     ]
 
 } );
 
-for ( const [_, person_id_entries] of [...data.throughRows( {
-    filterBy: [
-        ['product_atc_code', x => x],
-        ['Age_presc', x => x > 45]
+data.sort(
+    [
+        ['person_id', 'asc'],
+        ['contact_date', ( a, b ) => a.getTime() - b.getTime()]
     ],
-    groupBy: ['person_id', 'contact_date']
-} )].slice( 0, 1 ) ) {
-    console.log( person_id_entries );
+    { groupBy: ['person_id', 'contact_date'] }
+);
+
+data.filter(
+    row => !( [...( Object.entries( row ) )].every( cell => cell === undefined ) ),
+    {
+        groupBy: ['person_id'],
+        groupFilter: {
+            'person_id': ( { length } ) => length >= 4
+        }
+    }
+);
+
+for ( const { row, indices: [cx, _, tx] } of data.through_rows( { groupBy: ['person_id', 'contact_date'], ignore: ['groups'] } ) ) {
+    let wait_time_days = 0;
+    let wait_time_weeks = 0;
+    if ( cx > 0 ) {
+        wait_time_days = Math.floor( ( ( row.contact_date - data.rows[tx - 1].contact_date ) / 1000 ) / ( 3600 * 24 ) );
+        wait_time_weeks = Math.floor( wait_time_days / 7 );
+    }
+    row.wait_time_days = wait_time_days;
+    row.wait_time_weeks = wait_time_weeks;
+    row.contact_date = row.contact_date.getTime();
 }
+
+console.timeEnd( 'Dataset processing :' );
