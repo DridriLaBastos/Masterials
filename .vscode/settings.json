@@ -1,5 +1,4 @@
 {
-    "jupyter.jupyterServerType": "local",
-    "python.pythonPath": "/usr/bin/python3",
+	"jupyter.jupyterServerType": "local",
     "cmake.configureOnOpen": false
 }
