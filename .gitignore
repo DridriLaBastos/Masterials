@@ -1,5 +1,5 @@
-*.csv
 *.DS_Store
 *.pdf
 node_modules
 *.vscode
+*.ipynb_checkpoints
