@@ -1,7 +1,7 @@
 /* eslint-env browser */
 import { ExtendedWorker } from './aemijs/module/multithread.js';
 
-const csvPath = window.location.href + 'PatientsHTA.csv';
+const csvPath = window.location.origin + '/PatientsHTA.csv';
 
 const WorkerOptions = {
     promise: true,
@@ -9,6 +9,7 @@ const WorkerOptions = {
     localImports: [
         '/aemijs/browser/multithread-worker.js',
         '/aemijs/browser/dataset.js',
+        '/aemijs/browser/immutable.js',
         '/tensorflow/tf.min.js',
     ]
 };
@@ -35,7 +36,7 @@ const worker = new ExtendedWorker( function () {
 
 }, WorkerOptions );
 
-worker.postMessage( { type: 'prepare-url', url: window.location.origin + '/PatientsHTA.csv' } ).then( csvPath_ => {
+worker.postMessage( { type: 'prepare-url', url: csvPath } ).then( csvPath_ => {
     if ( csvPath_ === csvPath ) {
         worker.postMessage( {
             type: 'eval', data: ( async ( { tf, data, scope } ) => {
@@ -115,14 +116,9 @@ worker.postMessage( { type: 'prepare-url', url: window.location.origin + '/Patie
                 }
                 {
                     const cdi = _dset.header.getColumnIndexByColumnKey( 'contact_date' );
-                    _dset.map( row => {
-                        const time = row[cdi];
-                        const date = new Date( time );
-                        const month = date.getMonth();
-                        const row_ = [...row, month];
-                        return row_;
-                    } );
+                    _dset.map( row => [...row, ( new Date( row[cdi] ) ).getMonth()], { inplace: true } );
                     _dset.header.addColumn( 'contact_date_month', 'number' );
+                    _dset.encodeColumn( 'contact_date_month' );
                 }
                 {
                     const x = _dset.header.getColumnIndexByColumnKey( 'contact_date' );
@@ -152,20 +148,22 @@ worker.postMessage( { type: 'prepare-url', url: window.location.origin + '/Patie
                     _dset.encodeColumn( 'wait_time_months' );
                 }
                 {
-                    const oneHotColumns = ['specialty_label', 'product_atc_code', 'gender_code', 'wait_time_months'];
+                    const oneHotColumns = ['specialty_label', 'product_atc_code','gender_code', 'contact_date_month', 'wait_time_months'];
                     const oneHotMap = oneHotColumns.map( key => {
                         const { index, encoder } = _dset.header.getColumnByKey( key );
                         return [index, encoder];
                     } );
                     _dset.mapAsync( row => {
-                        const row_ = [...row];
-                        for ( const [index, encoder] of oneHotMap ) {
-                            row_[index] = encoder.getOneHotEncodedByIndex( row_[index] );
+                        for ( let i = 0, { length } = oneHotMap; i < length; i += 1 ) {
+                            const [index, encoder] = oneHotMap[i];
+                            row[index] = encoder.getOneHotEncodedByIndex( row[index] );
                         }
-                        return row_;
-                    } );
+                        return row;
+                    }, { inplace: true } );
                 }
                 console.timeEnd( 'Dataset processing :' );
+
+                data.raw = _dset.rows;
 
                 let xList_d;
                 let yList_d;
