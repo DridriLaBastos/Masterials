@@ -26,7 +26,7 @@ const worker = new ExtendedWorker( function () {
         if ( typeof func !== 'function' ) {
             throw new TypeError( `This is not a function: ${string}` );
         }
-        return func( { tf, data: globalThis.tf_data, scope: globalThis } );
+        return func( { tf, data: globalThis.tf_data, scope: globalThis, self: globalThis } );
     }, { propertyAccessor: 'data' } );
 
     listeners.addTypeListener( 'prepare-url', string => {
@@ -39,7 +39,7 @@ const worker = new ExtendedWorker( function () {
 worker.postMessage( { type: 'prepare-url', url: csvPath } ).then( csvPath_ => {
     if ( csvPath_ === csvPath ) {
         worker.postMessage( {
-            type: 'eval', data: ( async ( { tf, data, scope } ) => {
+            type: 'eval', data: ( async ( { tf, data, self } ) => {
 
                 const { __csv_url__: csvPath } = data;
 
@@ -52,7 +52,8 @@ worker.postMessage( { type: 'prepare-url', url: csvPath } ).then( csvPath_ => {
                     console.log( 'TensorFlow Backend', tf.getBackend() );
                     console.log( 'TensorFlow Versions', tf.version );
                     console.log( 'TensorFlow Data', data );
-                    console.log( 'Worker Global Scope', scope );
+                    console.log( 'Worker Global', self );
+                    console.log( 'This', this );
                 }
                 console.groupEnd( 'Informations' );
 
@@ -137,7 +138,11 @@ worker.postMessage( { type: 'prepare-url', url: csvPath } ).then( csvPath_ => {
                             const days = hours / 24;
                             const weeks = days / 7;
                             const months = weeks / 4;
-                            visits[i].push( Math.round( days ), Math.round( weeks ), Math.round( months > 4 ? 5 : months ) );
+                            visits[i].push(
+                                Math.round( days ),
+                                Math.round( weeks ),
+                                Math.round( months > 4 ? 5 : months )
+                            );
                         }
                     }
                     _dset.header.addColumn( 'wait_time_days', 'number' );
@@ -148,7 +153,7 @@ worker.postMessage( { type: 'prepare-url', url: csvPath } ).then( csvPath_ => {
                     _dset.encodeColumn( 'wait_time_months' );
                 }
                 {
-                    const oneHotColumns = ['specialty_label', 'product_atc_code','gender_code', 'contact_date_month', 'wait_time_months'];
+                    const oneHotColumns = ['specialty_label', 'product_atc_code', 'gender_code', 'contact_date_month', 'wait_time_months'];
                     const oneHotMap = oneHotColumns.map( key => {
                         const { index, encoder } = _dset.header.getColumnByKey( key );
                         return [index, encoder];
@@ -159,41 +164,82 @@ worker.postMessage( { type: 'prepare-url', url: csvPath } ).then( csvPath_ => {
                             row[index] = encoder.getOneHotEncodedByIndex( row[index] );
                         }
                         return row;
-                    }, { inplace: true } );
+                    }, { inplace: true } );
                 }
                 console.timeEnd( 'Dataset processing :' );
 
-                data.raw = _dset.rows;
+                data.rows = _dset.rows;
 
-                let xList_d;
-                let yList_d;
+                data.xList = [];
+                data.yList = [];
 
                 {
                     const yCn = ['product_atc_code'];
                     const yCnX = yCn.map( k => _dset.header.getColumnIndexByColumnKey( k ) );
                     const floor = visit_thresold;
-                    let xList = [];
-                    let yList = [];
                     for ( const visits of _dset.groupBy( ['person_id'] ).values() ) {
                         const { length: l } = visits;
                         for ( let i = 0, limit = l - floor + 1; i < limit; i += 1 ) {
                             const j = i + floor - 1;
                             const timeSerie = visits.slice( i, j );
-                            xList.push( timeSerie );
-                            yList.push( yCnX.map( x => visits[j][x] ) );
+                            data.xList.push( tf.tensor2d( timeSerie ) );
+                            data.yList.push( tf.tensor2d( yCnX.map( x => ( visits[j][x] ) ) ) );
                         }
                     }
-                    xList_d = xList;
-                    yList_d = yList;
                 }
 
+                delete data.rows;
+
+                console.log( data.xList );
+                console.log( data.yList );
+
+                const { shape: [x1shape,x2shape] } = data.xList[0];
+                const { shape: [y1shape,y2shape] } = data.yList[0];
+                
+                console.log( 'x shape', [x1shape,x2shape] );
+                console.log( 'y shape', [y1shape,y2shape] );
+                
                 /**
                  * Tensorflow Part
                  */
                 console.time( 'Tensorflow Conversion :' );
-                data.xData = tf.data.array( xList_d );
-                data.yData = tf.data.array( yList_d );
+
+                const x_ds = tf.data.array( data.xList );
+                const y_ds = tf.data.array( data.yList );
+                const z_ds = tf.data.zip( { xs: x_ds, ys: y_ds } );
+
+                data.x_ds = x_ds;
+                data.y_ds = y_ds;
+                data.z_ds = z_ds;
+                
                 console.timeEnd( 'Tensorflow Conversion :' );
+
+                ( async () => console.log( 'Dataset to Array :', await data.z_ds.toArray() ) )();
+
+                console.time( 'TensorFlow Model Training :' );
+
+                model = tf.sequential();
+                model.add( tf.layers.inputLayer( { inputShape: [x1shape, x2shape], dtype: 'int32' } ) );
+                model.add( tf.layers.conv1d( { filters: 256, kernelSize: visit_thresold - 1, activation: 'relu', padding: 'same' } ) );
+                model.add( tf.layers.conv1d( { filters: 256, kernelSize: visit_thresold - 2, activation: 'relu', padding: 'same' } ) );
+                model.add( tf.layers.conv1d( { filters: 256, kernelSize: visit_thresold - 3, activation: 'relu', padding: 'same' } ) );
+                model.add( tf.layers.globalAveragePooling2d() );
+                model.add( tf.layers.dense( { units: y2shape, activation: 'sigmoid' } ) );
+                model.compile( { optimizer: 'adam', loss: 'meanSquaredError', metrics: ['mae', 'accuracy'] } );
+                model.summary();
+
+                console.log( model.outputs );
+
+                delete data.xList;
+                delete data.yList;
+
+                ( async () => ( data.history = await model.fitDataset( z_ds, {
+                    epochs: 4,
+                    batchesPerEpoch: visit_thresold - 1,
+                    callbacks: { onEpochEnd: console.log }
+                } ) ) )();
+
+                console.timeEnd( 'TensorFlow Model Training :' );
 
                 return data;
 
